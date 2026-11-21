@@ -8,5 +8,11 @@ async fn main() {
     let app = api::router(api::AppState::new(store));
     let listener = tokio::net::TcpListener::bind(&addr).await.expect("failed to bind");
     println!("message board listening on http://{addr} (db: {db})");
-    axum::serve(listener, app).await.expect("server error");
+    axum::serve(listener, app)
+        .with_graceful_shutdown(async {
+            // Ctrl-C works on Linux, macOS and Windows.
+            let _ = tokio::signal::ctrl_c().await;
+        })
+        .await
+        .expect("server error");
 }
