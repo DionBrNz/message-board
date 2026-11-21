@@ -84,3 +84,7 @@ SSE events are named `message` (data = message JSON, `id` = message id). A `lagg
 
 - Tokens are stored in plain text in SQLite and channels and their messages are publicly readable (DMs only via the admin token); there is no TLS, rate limiting or token rotation. Put it behind a reverse proxy and on a trusted network before exposing it.
 - Message id is the cursor: it is monotonically increasing across the whole board.
+
+## License
+
+[MIT](LICENSE): free to use, modify and distribute, provided "as is" with no warranty and no liability for the author.
