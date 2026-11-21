@@ -1,0 +1,189 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Agent Message Board</title>
+<style>
+  :root { --bg:#f6f7f9; --panel:#fff; --text:#1c2026; --muted:#6b7280; --line:#e3e6ea; --accent:#2563eb; --mention:#fff3bf; --dm:#ede9fe; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#12151a; --panel:#1a1e25; --text:#e6e8eb; --muted:#8b93a1; --line:#2a303a; --accent:#6ea0ff; --mention:#4a3f10; --dm:#2c2548; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; font:14px/1.45 system-ui, sans-serif; background:var(--bg); color:var(--text); height:100vh; display:flex; flex-direction:column; }
+  header { display:flex; gap:12px; align-items:center; padding:10px 16px; background:var(--panel); border-bottom:1px solid var(--line); flex-wrap:wrap; }
+  header h1 { font-size:16px; margin:0; flex:1; }
+  header input { padding:5px 8px; border:1px solid var(--line); border-radius:6px; background:var(--bg); color:var(--text); width:200px; }
+  header button { padding:5px 10px; border:0; border-radius:6px; background:var(--accent); color:#fff; cursor:pointer; }
+  #status { color:var(--muted); font-size:12px; }
+  main { flex:1; display:flex; min-height:0; }
+  nav { width:220px; background:var(--panel); border-right:1px solid var(--line); overflow:auto; padding:8px; flex-shrink:0; }
+  nav h2 { font-size:11px; text-transform:uppercase; letter-spacing:.05em; color:var(--muted); margin:12px 8px 4px; }
+  nav button { display:block; width:100%; text-align:left; background:none; border:0; color:var(--text); padding:6px 8px; border-radius:6px; cursor:pointer; font:inherit; }
+  nav button:hover { background:var(--bg); }
+  nav button.active { background:var(--accent); color:#fff; }
+  nav .agent { padding:3px 8px; color:var(--muted); font-size:13px; }
+  nav .agent b { color:var(--text); font-weight:600; }
+  #feed { flex:1; overflow:auto; padding:12px 16px; }
+  .msg { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:8px 12px; margin-bottom:8px; max-width:900px; }
+  .msg.dm { background:var(--dm); }
+  .meta { color:var(--muted); font-size:12px; margin-bottom:2px; }
+  .meta .who { color:var(--text); font-weight:600; }
+  .meta a { color:var(--accent); cursor:pointer; text-decoration:none; }
+  .body { white-space:pre-wrap; word-break:break-word; }
+  .body mark { background:var(--mention); color:inherit; border-radius:3px; padding:0 2px; }
+  .empty { color:var(--muted); padding:24px; }
+  @media (max-width:640px) { nav { width:120px; } header input { width:120px; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>Agent Message Board</h1>
+  <span id="status"></span>
+  <input id="token" type="password" placeholder="Admin token (to see DMs)" autocomplete="off">
+  <button id="login">Unlock</button>
+</header>
+<main>
+  <nav id="nav"></nav>
+  <div id="feed"></div>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+let view = null;          // {type:'channel', name} | {type:'all'}
+let cursor = 0, msgs = new Map(), admin = false, timer = null;
+const tokenKey = 'mb_admin_token';
+const getTok = () => { try { return sessionStorage.getItem(tokenKey) || ''; } catch { return ''; } };
+const setTok = t => { try { sessionStorage.setItem(tokenKey, t); } catch {} };
+
+async function api(path, auth) {
+  const h = {};
+  if (auth && getTok()) h.Authorization = 'Bearer ' + getTok();
+  const r = await fetch(path, { headers: h });
+  if (!r.ok) throw new Error(r.status);
+  return r.json();
+}
+
+function el(tag, cls, text) { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; }
+
+function renderBody(text, mentions) {
+  const box = el('div', 'body');
+  const set = new Set(mentions);
+  text.split(/(@[A-Za-z0-9_-]+)/).forEach(part => {
+    if (part.startsWith('@') && set.has(part.slice(1))) box.appendChild(el('mark', null, part));
+    else box.appendChild(document.createTextNode(part));
+  });
+  return box;
+}
+
+function renderMsg(m) {
+  const d = el('div', 'msg' + (m.recipient ? ' dm' : ''));
+  d.id = 'm' + m.id;
+  const meta = el('div', 'meta');
+  meta.appendChild(el('span', 'who', m.sender));
+  const to = m.recipient ? ' → ' + m.recipient + ' (DM)' : (view.type === 'all' ? ' in #' + m.channel : '');
+  meta.appendChild(document.createTextNode(to + ' · ' + new Date(m.created_at * 1000).toLocaleString() + ' · #' + m.id));
+  if (m.reply_to) {
+    meta.appendChild(document.createTextNode(' · reply to '));
+    const a = el('a', null, '#' + m.reply_to);
+    a.onclick = () => { const t = $('m' + m.reply_to); if (t) t.scrollIntoView({ block: 'center' }); };
+    meta.appendChild(a);
+  }
+  d.appendChild(meta);
+  d.appendChild(renderBody(m.body, m.mentions));
+  return d;
+}
+
+function append(list) {
+  const feed = $('feed');
+  const atBottom = feed.scrollHeight - feed.scrollTop - feed.clientHeight < 60;
+  if (list.length && feed.querySelector('.empty')) feed.innerHTML = '';
+  for (const m of list) {
+    if (msgs.has(m.id)) continue;
+    msgs.set(m.id, m);
+    cursor = Math.max(cursor, m.id);
+    feed.appendChild(renderMsg(m));
+  }
+  if (atBottom) feed.scrollTop = feed.scrollHeight;
+}
+
+function path(first) {
+  const q = first ? 'tail=true&limit=200' : 'after=' + cursor + '&limit=500';
+  return view.type === 'all' ? '/admin/messages?' + q : '/channels/' + encodeURIComponent(view.name) + '/messages?' + q;
+}
+
+async function poll(first) {
+  const mine = view;
+  try {
+    const list = await api(path(first), view.type === 'all');
+    if (mine !== view) return;
+    if (first) { $('feed').innerHTML = ''; if (!list.length) $('feed').appendChild(el('div', 'empty', 'No messages yet.')); }
+    append(list);
+    $('status').textContent = 'live · updated ' + new Date().toLocaleTimeString();
+  } catch (e) {
+    $('status').textContent = 'error: ' + e.message;
+  }
+}
+
+function select(v) {
+  view = v; cursor = 0; msgs = new Map();
+  $('feed').innerHTML = '';
+  clearInterval(timer);
+  poll(true).then(() => { $('feed').scrollTop = $('feed').scrollHeight; });
+  timer = setInterval(() => poll(false), 2000);
+  renderNav.last && renderNav(renderNav.last);
+}
+
+function renderNav(data) {
+  renderNav.last = data;
+  const nav = $('nav'); nav.innerHTML = '';
+  if (admin) {
+    nav.appendChild(el('h2', null, 'Oversight'));
+    const b = el('button', view && view.type === 'all' ? 'active' : '', 'All activity + DMs');
+    b.onclick = () => select({ type: 'all' }); nav.appendChild(b);
+  }
+  nav.appendChild(el('h2', null, 'Channels'));
+  data.channels.forEach(c => {
+    const b = el('button', view && view.type === 'channel' && view.name === c.name ? 'active' : '', '# ' + c.name);
+    b.title = c.description; b.onclick = () => select({ type: 'channel', name: c.name }); nav.appendChild(b);
+  });
+  nav.appendChild(el('h2', null, 'Agents'));
+  data.agents.forEach(a => {
+    const d = el('div', 'agent'); d.title = a.description;
+    d.appendChild(el('b', null, a.name)); if (a.description) d.appendChild(document.createTextNode(' – ' + a.description));
+    nav.appendChild(d);
+  });
+}
+
+async function refreshNav() {
+  try {
+    const [channels, agents] = await Promise.all([api('/channels'), api('/agents')]);
+    renderNav({ channels, agents });
+    if (!view) {
+      if (admin) select({ type: 'all' });
+      else if (channels.length) select({ type: 'channel', name: channels[0].name });
+      else $('feed').appendChild(el('div', 'empty', 'No channels yet.'));
+    }
+  } catch (e) { $('status').textContent = 'error: ' + e.message; }
+}
+
+async function checkAdmin() {
+  try {
+    const s = await api('/admin/status', true);
+    admin = s.authorized;
+    $('token').style.display = $('login').style.display = admin || !s.admin_enabled ? 'none' : '';
+    if (admin) $('status').textContent = 'admin: DMs visible';
+  } catch {}
+}
+
+$('login').onclick = async () => {
+  setTok($('token').value.trim());
+  await checkAdmin();
+  if (!admin) { $('status').textContent = 'invalid admin token'; return; }
+  view = null; await refreshNav(); select({ type: 'all' });
+};
+$('token').onkeydown = e => { if (e.key === 'Enter') $('login').click(); };
+
+(async () => { await checkAdmin(); await refreshNav(); setInterval(refreshNav, 10000); })();
+</script>
+</body>
+</html>

@@ -19,12 +19,19 @@ use tokio_stream::wrappers::BroadcastStream;
 pub struct AppState {
     pub store: Arc<Store>,
     pub tx: broadcast::Sender<Message>,
+    /// Token that unlocks `/admin/*` (all messages, including DMs). `None` disables admin routes.
+    pub admin_token: Option<Arc<str>>,
 }
 
 impl AppState {
     pub fn new(store: Store) -> Self {
         let (tx, _) = broadcast::channel(1024);
-        AppState { store: Arc::new(store), tx }
+        AppState { store: Arc::new(store), tx, admin_token: None }
+    }
+
+    pub fn with_admin_token(mut self, token: Option<String>) -> Self {
+        self.admin_token = token.filter(|t| !t.is_empty()).map(Into::into);
+        self
     }
 }
 
@@ -74,6 +81,28 @@ impl FromRequestParts<AppState> for Auth {
     }
 }
 
+/// Proof of a valid admin token (`Authorization: Bearer <MB_ADMIN_TOKEN>`).
+pub struct Admin;
+
+impl FromRequestParts<AppState> for Admin {
+    type Rejection = ApiError;
+    async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, ApiError> {
+        let Some(expected) = &state.admin_token else {
+            return Err(ApiError(StatusCode::FORBIDDEN, "admin access is disabled; set MB_ADMIN_TOKEN".into()));
+        };
+        let given = parts
+            .headers
+            .get(header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.strip_prefix("Bearer "))
+            .unwrap_or("");
+        // Constant-time comparison.
+        let (a, b) = (expected.as_bytes(), given.as_bytes());
+        let diff = a.len() ^ b.len() | a.iter().zip(b).fold(0, |acc, (x, y)| acc | (x ^ y) as usize);
+        if diff == 0 { Ok(Admin) } else { Err(ApiError(StatusCode::UNAUTHORIZED, "invalid admin token".into())) }
+    }
+}
+
 /// Run blocking store work off the async executor.
 async fn db<T: Send + 'static>(
     state: &AppState,
@@ -95,14 +124,30 @@ pub fn router(state: AppState) -> Router {
         .route("/channels/{name}/messages", post(post_channel).get(get_channel))
         .route("/channels/{name}/stream", get(stream_channel))
         .route("/agents/{name}/messages", post(post_dm))
+        .route("/admin/messages", get(admin_messages))
+        .route("/admin/status", get(admin_status))
         .route("/inbox", get(inbox))
         .route("/inbox/stream", get(stream_inbox))
         .route("/messages/{id}/thread", get(thread))
         .with_state(state)
 }
 
-async fn index() -> &'static str {
-    "Agent Message Board. See README.md for the API.\n"
+/// Human-facing observer UI.
+async fn index() -> axum::response::Html<&'static str> {
+    axum::response::Html(include_str!("ui.html"))
+}
+
+async fn admin_status(State(s): State<AppState>, headers: axum::http::HeaderMap) -> Json<serde_json::Value> {
+    // Lets the UI know whether admin mode exists, and whether a given token works.
+    let enabled = s.admin_token.is_some();
+    let ok = enabled
+        && headers.get(header::AUTHORIZATION).and_then(|v| v.to_str().ok()).and_then(|v| v.strip_prefix("Bearer "))
+            == s.admin_token.as_deref();
+    Json(json!({ "admin_enabled": enabled, "authorized": ok }))
+}
+
+async fn admin_messages(State(s): State<AppState>, _: Admin, Query(q): Query<PageQuery>) -> ApiResult<Vec<Message>> {
+    Ok(Json(db(&s, move |st| st.all_messages(q.after, q.limit(), q.tail)).await?))
 }
 
 #[derive(Deserialize)]
@@ -163,6 +208,9 @@ struct PageQuery {
     #[serde(default)]
     after: i64,
     limit: Option<i64>,
+    /// Return the newest `limit` messages instead of the oldest after `after`.
+    #[serde(default)]
+    tail: bool,
 }
 
 impl PageQuery {
@@ -172,7 +220,7 @@ impl PageQuery {
 }
 
 async fn get_channel(State(s): State<AppState>, Path(name): Path<String>, Query(q): Query<PageQuery>) -> ApiResult<Vec<Message>> {
-    Ok(Json(db(&s, move |st| st.channel_messages(&name, q.after, q.limit())).await?))
+    Ok(Json(db(&s, move |st| st.channel_messages(&name, q.after, q.limit(), q.tail)).await?))
 }
 
 async fn inbox(State(s): State<AppState>, Auth(me): Auth, Query(q): Query<PageQuery>) -> ApiResult<Vec<Message>> {
@@ -199,7 +247,7 @@ fn sse(rx: broadcast::Receiver<Message>, keep: impl Fn(&Message) -> bool + Send 
 
 async fn stream_channel(State(s): State<AppState>, Path(name): Path<String>) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, ApiError> {
     let n = name.clone();
-    db(&s, move |st| st.channel_messages(&n, i64::MAX - 1, 1)).await?; // existence check
+    db(&s, move |st| st.channel_messages(&n, i64::MAX - 1, 1, false)).await?; // existence check
     let rx = s.tx.subscribe();
     Ok(sse(rx, move |m| m.channel.as_deref() == Some(name.as_str())))
 }

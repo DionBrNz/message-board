@@ -287,18 +287,33 @@ impl Store {
         })
     }
 
-    /// Channel messages with id > `after`, oldest first.
-    pub fn channel_messages(&self, channel: &str, after: i64, limit: i64) -> Result<Vec<Message>> {
+    /// Run a message query. `filter` is a WHERE clause over alias `m`; `?1` is bound to `arg`,
+    /// `?2` to `after`, `?3` to `limit`. With `tail`, return the newest `limit` messages
+    /// (still oldest first) instead of the oldest `limit` after the cursor.
+    fn query_messages(&self, filter: &str, arg: &str, after: i64, limit: i64, tail: bool) -> Result<Vec<Message>> {
         let conn = self.conn();
-        let exists: Option<i64> = conn.query_row("SELECT 1 FROM channels WHERE name = ?1", [channel], |r| r.get(0)).optional()?;
+        let sql = if tail {
+            format!("SELECT * FROM (SELECT {MSG_COLS} FROM messages m WHERE {filter} AND m.id > ?2 ORDER BY m.id DESC LIMIT ?3) ORDER BY id")
+        } else {
+            format!("SELECT {MSG_COLS} FROM messages m WHERE {filter} AND m.id > ?2 ORDER BY m.id LIMIT ?3")
+        };
+        let mut stmt = conn.prepare(&sql)?;
+        let msgs = stmt.query_map(params![arg, after, limit], Self::row_to_msg)?.collect::<std::result::Result<Vec<_>, _>>()?;
+        Self::with_mentions(&conn, msgs)
+    }
+
+    /// Channel messages with id > `after`, oldest first (or the newest `limit` if `tail`).
+    pub fn channel_messages(&self, channel: &str, after: i64, limit: i64, tail: bool) -> Result<Vec<Message>> {
+        let exists: Option<i64> = self.conn().query_row("SELECT 1 FROM channels WHERE name = ?1", [channel], |r| r.get(0)).optional()?;
         if exists.is_none() {
             return Err(StoreError::NotFound(format!("channel '{channel}' not found")));
         }
-        let mut stmt = conn.prepare(&format!(
-            "SELECT {MSG_COLS} FROM messages m WHERE m.channel = ?1 AND m.id > ?2 ORDER BY m.id LIMIT ?3"
-        ))?;
-        let msgs = stmt.query_map(params![channel, after, limit], Self::row_to_msg)?.collect::<std::result::Result<Vec<_>, _>>()?;
-        Self::with_mentions(&conn, msgs)
+        self.query_messages("m.channel = ?1", channel, after, limit, tail)
+    }
+
+    /// Every message on the board, including direct messages. For human oversight.
+    pub fn all_messages(&self, after: i64, limit: i64, tail: bool) -> Result<Vec<Message>> {
+        self.query_messages("?1 = ?1", "", after, limit, tail)
     }
 
     /// Everything addressed to `agent` (DMs and @mentions) with id > `after`, oldest first.
