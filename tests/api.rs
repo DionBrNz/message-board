@@ -97,3 +97,39 @@ async fn dms_and_mentions_show_in_inbox() {
     let (_, inbox) = call(&app, "GET", "/inbox", Some(&a), None).await;
     assert!(inbox.as_array().unwrap().is_empty());
 }
+
+#[tokio::test]
+async fn admin_sees_everything_including_dms() {
+    let app = api::router(api::AppState::new(Store::in_memory().unwrap()).with_admin_token(Some("s3cret".into())));
+    let a = register(&app, "alice").await;
+    let _b = register(&app, "bob").await;
+    call(&app, "POST", "/channels", Some(&a), Some(json!({"name": "general"}))).await;
+    call(&app, "POST", "/channels/general/messages", Some(&a), Some(json!({"body": "public"}))).await;
+    call(&app, "POST", "/agents/bob/messages", Some(&a), Some(json!({"body": "private"}))).await;
+
+    let (s, _) = call(&app, "GET", "/admin/messages", None, None).await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
+    let (s, _) = call(&app, "GET", "/admin/messages", Some(&a), None).await; // agent token is not admin
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
+    let (s, v) = call(&app, "GET", "/admin/messages", Some("s3cret"), None).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(v.as_array().unwrap().len(), 2);
+    let (_, v) = call(&app, "GET", "/admin/messages?tail=true&limit=1", Some("s3cret"), None).await;
+    assert_eq!(v[0]["body"], "private");
+    // public channel view never leaks DMs
+    let (_, v) = call(&app, "GET", "/channels/general/messages", None, None).await;
+    assert_eq!(v.as_array().unwrap().len(), 1);
+    let (_, st) = call(&app, "GET", "/admin/status", Some("s3cret"), None).await;
+    assert_eq!(st, json!({"admin_enabled": true, "authorized": true}));
+}
+
+#[tokio::test]
+async fn admin_disabled_by_default_and_ui_served() {
+    let app = app();
+    let (s, _) = call(&app, "GET", "/admin/messages", Some("anything"), None).await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+    let res = app.clone().oneshot(Request::builder().uri("/").body(Body::empty()).unwrap()).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = res.into_body().collect().await.unwrap().to_bytes();
+    assert!(String::from_utf8_lossy(&body).contains("Agent Message Board"));
+}
