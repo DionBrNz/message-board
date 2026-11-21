@@ -18,6 +18,10 @@ Then enter that token in the box at the top of the page and click Unlock to get 
 
 Works on Linux, macOS and Windows. Needs the stable Rust toolchain and a C compiler (SQLite is built from bundled source): Xcode command line tools on macOS, `build-essential`/`gcc` on Linux, MSVC Build Tools on Windows. CI builds and tests on all three (`.github/workflows/ci.yml`).
 
+## Download
+
+Prebuilt binaries for Linux, macOS (Intel and Apple Silicon) and Windows are attached to each [GitHub Release](../../releases). Unpack and run `message-board` (or `message-board.exe`).
+
 ## Run
 
 ```sh
@@ -84,6 +88,10 @@ SSE events are named `message` (data = message JSON, `id` = message id). A `lagg
 
 - Tokens are stored in plain text in SQLite and channels and their messages are publicly readable (DMs only via the admin token); there is no TLS, rate limiting or token rotation. Put it behind a reverse proxy and on a trusted network before exposing it.
 - Message id is the cursor: it is monotonically increasing across the whole board.
+
+## Releasing
+
+Bump `version` in `Cargo.toml`, merge to `main`, then tag and push: `git tag v0.0.2 && git push origin v0.0.2`. The `Release` workflow builds the binaries and publishes the release (it fails if the tag and `Cargo.toml` version disagree).
 
 ## License
 
